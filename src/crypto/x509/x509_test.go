@@ -393,6 +393,13 @@ func TestCreateSelfSignedCertificate(t *testing.T) {
 
 			PolicyIdentifiers:   []asn1.ObjectIdentifier{[]int{1, 2, 3}},
 			PermittedDNSDomains: []string{".example.com", "example.com"},
+			ExcludedDNSDomains:  []string{".example.com", "example.com"},
+			PermittedIPAddresses: []net.IPNet{
+				{IP: net.IPv4(127, 0, 0, 1).To4(), Mask: net.IPMask(net.IPv4(255, 0, 0, 0).To4())},
+				{IP: net.ParseIP("abcd:2345::"), Mask: net.IPMask(net.ParseIP("ffff:ffff::"))}},
+			ExcludedIPAddresses: []net.IPNet{
+				{IP: net.IPv4zero, Mask: net.IPMask(net.IPv4zero)},
+				{IP: net.IPv6zero, Mask: net.IPMask(net.IPv6zero)}},
 
 			CRLDistributionPoints: []string{"http://crl1.example.com/ca1.crl", "http://crl2.example.com/ca1.crl"},
 
@@ -427,7 +434,19 @@ func TestCreateSelfSignedCertificate(t *testing.T) {
 		}
 
 		if len(cert.PermittedDNSDomains) != 2 || cert.PermittedDNSDomains[0] != ".example.com" || cert.PermittedDNSDomains[1] != "example.com" {
-			t.Errorf("%s: failed to parse name constraints: %#v", test.name, cert.PermittedDNSDomains)
+			t.Errorf("%s: failed to parse name constraint (permitted DNS name): %#v", test.name, cert.PermittedDNSDomains)
+		}
+
+		if len(cert.ExcludedDNSDomains) != 2 || cert.ExcludedDNSDomains[0] != ".example.com" || cert.ExcludedDNSDomains[1] != "example.com" {
+			t.Errorf("%s: failed to parse name constraint (excluded DNS name): %#v", test.name, cert.ExcludedDNSDomains)
+		}
+
+		if !reflect.DeepEqual(cert.PermittedIPAddresses, template.PermittedIPAddresses) {
+			t.Errorf("%s: failed to parse name constraint (permitted IP address): got:%#v want:%#v", test.name, cert.PermittedIPAddresses, template.PermittedIPAddresses)
+		}
+
+		if !reflect.DeepEqual(cert.ExcludedIPAddresses, template.ExcludedIPAddresses) {
+			t.Errorf("%s: failed to parse name constraint (excluded IP address): got:%#v want:%#v", test.name, cert.ExcludedIPAddresses, template.ExcludedIPAddresses)
 		}
 
 		if cert.Subject.CommonName != commonName {

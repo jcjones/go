@@ -559,6 +559,9 @@ type Certificate struct {
 	// Name constraints
 	PermittedDNSDomainsCritical bool // if true then the name constraints are marked critical.
 	PermittedDNSDomains         []string
+	PermittedIPAddresses        []net.IPNet
+	ExcludedDNSDomains          []string
+	ExcludedIPAddresses         []net.IPNet
 
 	// CRL Distribution Points
 	CRLDistributionPoints []string
@@ -766,7 +769,8 @@ type nameConstraints struct {
 }
 
 type generalSubtree struct {
-	Name string `asn1:"tag:2,optional,ia5"`
+	Name      string `asn1:"tag:2,optional,ia5"`
+	IPAddress []byte `asn1:"tag:7,optional"`
 }
 
 // RFC 5280, 4.2.2.1
@@ -927,6 +931,19 @@ func parseSANExtension(value []byte) (dnsNames, emailAddresses []string, ipAddre
 	return
 }
 
+func parseCIDR(address []byte) (*net.IPNet, error) {
+	switch len(address) {
+	case net.IPv4len * 2:
+		cidr := &net.IPNet{IP: address[:net.IPv4len], Mask: address[net.IPv4len:]}
+		return cidr, nil
+	case net.IPv6len * 2:
+		cidr := &net.IPNet{IP: address[:net.IPv6len], Mask: address[net.IPv6len:]}
+		return cidr, nil
+	default:
+		return nil, errors.New("x509: certificate contained IP Address + Net of length " + strconv.Itoa(len(address)))
+	}
+}
+
 func parseCertificate(in *certificate) (*Certificate, error) {
 	out := new(Certificate)
 	out.Raw = in.Raw
@@ -1039,18 +1056,38 @@ func parseCertificate(in *certificate) (*Certificate, error) {
 					return nil, errors.New("x509: trailing data after X.509 NameConstraints")
 				}
 
-				if len(constraints.Excluded) > 0 && e.Critical {
-					return out, UnhandledCriticalExtension{}
+				for _, subtree := range constraints.Excluded {
+					if len(subtree.IPAddress) > 0 {
+						cidr, err := parseCIDR(subtree.IPAddress)
+						if err != nil {
+							return nil, err
+						}
+						out.ExcludedIPAddresses = append(out.ExcludedIPAddresses, *cidr)
+					}
+
+					if len(subtree.Name) > 0 {
+						out.ExcludedDNSDomains = append(out.ExcludedDNSDomains, subtree.Name)
+					}
 				}
 
 				for _, subtree := range constraints.Permitted {
-					if len(subtree.Name) == 0 {
-						if e.Critical {
-							return out, UnhandledCriticalExtension{}
+					if len(subtree.IPAddress) > 0 {
+						cidr, err := parseCIDR(subtree.IPAddress)
+						if err != nil {
+							return nil, err
 						}
-						continue
+						out.PermittedIPAddresses = append(out.PermittedIPAddresses, *cidr)
 					}
-					out.PermittedDNSDomains = append(out.PermittedDNSDomains, subtree.Name)
+
+					if len(subtree.Name) > 0 {
+						out.PermittedDNSDomains = append(out.PermittedDNSDomains, subtree.Name)
+					}
+				}
+
+				if len(out.ExcludedDNSDomains) == 0 && len(out.ExcludedIPAddresses) == 0 &&
+					len(out.PermittedDNSDomains) == 0 && len(out.PermittedIPAddresses) == 0 {
+					// If we didn't parse anything then we do the critical check, below.
+					unhandled = true
 				}
 
 			case 31:
@@ -1435,20 +1472,33 @@ func buildExtensions(template *Certificate) (ret []pkix.Extension, err error) {
 		n++
 	}
 
-	if len(template.PermittedDNSDomains) > 0 &&
+	if (len(template.PermittedDNSDomains) > 0 || len(template.PermittedIPAddresses) > 0 ||
+		len(template.ExcludedDNSDomains) > 0 || len(template.ExcludedIPAddresses) > 0) &&
 		!oidInExtensions(oidExtensionNameConstraints, template.ExtraExtensions) {
 		ret[n].Id = oidExtensionNameConstraints
 		ret[n].Critical = template.PermittedDNSDomainsCritical
 
 		var out nameConstraints
-		out.Permitted = make([]generalSubtree, len(template.PermittedDNSDomains))
-		for i, permitted := range template.PermittedDNSDomains {
-			out.Permitted[i] = generalSubtree{Name: permitted}
+		for _, permitted := range template.PermittedDNSDomains {
+			out.Permitted = append(out.Permitted, generalSubtree{Name: permitted})
 		}
+		for _, permitted := range template.PermittedIPAddresses {
+			ipbuf := append(permitted.IP, permitted.Mask...)
+			out.Permitted = append(out.Permitted, generalSubtree{IPAddress: ipbuf})
+		}
+		for _, excluded := range template.ExcludedDNSDomains {
+			out.Excluded = append(out.Excluded, generalSubtree{Name: excluded})
+		}
+		for _, excluded := range template.ExcludedIPAddresses {
+			ipbuf := append(excluded.IP, excluded.Mask...)
+			out.Excluded = append(out.Excluded, generalSubtree{IPAddress: ipbuf})
+		}
+
 		ret[n].Value, err = asn1.Marshal(out)
 		if err != nil {
 			return
 		}
+
 		n++
 	}
 
@@ -1561,7 +1611,8 @@ func signingParamsForPublicKey(pub interface{}, requestedSigAlgo SignatureAlgori
 // following members of template are used: SerialNumber, Subject, NotBefore,
 // NotAfter, KeyUsage, ExtKeyUsage, UnknownExtKeyUsage, BasicConstraintsValid,
 // IsCA, MaxPathLen, SubjectKeyId, DNSNames, PermittedDNSDomainsCritical,
-// PermittedDNSDomains, SignatureAlgorithm.
+// PermittedDNSDomains, PermittedIPAddresses, ExcludedDNSDomains,
+// ExcludedIPAddresses, SignatureAlgorithm.
 //
 // The certificate is signed by parent. If parent is equal to template then the
 // certificate is self-signed. The parameter pub is the public key of the
